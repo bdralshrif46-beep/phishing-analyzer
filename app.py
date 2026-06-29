@@ -10,7 +10,18 @@ from google.genai import types
 KNOWLEDGE_BASE_FILE = "knowledge_base.json"
 
 def load_knowledge_base():
-    default_keywords = ["عاجل", "تحديث", "حسابك مجمد", "اضغط هنا", "فورا", "قفل", "urgent", "verify", "suspended", "click here"]
+    default_keywords = [
+    
+        "عاجل", "تحديث", "حسابك مجمد", "حسابك موقوف", "اضغط هنا", "فورا", "قفل", "حظر", "بطاقتك محظورة", 
+        "انقر هنا", "تحقق من حسابك", "تأكيد الهوية", "ربحت", "جائزة", "عقد عمل", "بريد طارئ", "تسجيل الدخول", 
+        "تغيير كلمة المرور", "الغاء القفل", "سرقة", "اختراق", "امان حسابك", "مخالفة لسياسة", "تحديث البيانات", 
+        "البنك المركزي", "تم تعليق", "تنبيه اخير", "فرصة اخيرة", "روابط الدفع", "فواتير معلقة", "شحن مجاني", 
+        "وظيفة عن بعد", "استثمر الان", "اربح مال", "فحص الحساب", "التحقق البشري", "رابط امان", "توثيق الحساب",
+        "urgent", "verify", "suspended", "click here", "fake", "phishing", "update", "frozen", "locked", 
+        "account suspended", "verify now", "action required", "immediate action", "security alert", 
+        "password reset", "login here", "claim reward", "you won", "prize", "invoice pending", "update details", 
+        "bank alert", "card blocked", "final notice", "confirm identity", "secure link", "access denied", 
+        "free gift", "make money", "work from home", "crypto bonus", "official support", "unauthorized login"]
     if os.path.exists(KNOWLEDGE_BASE_FILE):
         try:
             with open(KNOWLEDGE_BASE_FILE, "r", encoding="utf-8") as f:
