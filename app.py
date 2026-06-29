@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import requests
 import streamlit as st
 from google import genai
@@ -50,10 +51,10 @@ def save_knowledge_base(keywords):
 def unshorten_url(url: str) -> str:
     """تتبع قفزات إعادة التوجيه المتتالية (حتى 5 مستويات) للوصول إلى الرابط النهائي الحقيقي."""
     current_url = url
-    max_redirects = 5
+    max_redirects = 3  # تقليل مستويات التوجيه للحفاظ على سرعة الأداء ومنع الـ Timeouts
     try:
         for _ in range(max_redirects):
-            response = requests.head(current_url, allow_redirects=False, timeout=4)
+            response = requests.head(current_url, allow_redirects=False, timeout=3)
             if 300 <= response.status_code < 400 and "Location" in response.headers:
                 next_url = response.headers["Location"]
                 if next_url.startswith("/"):
@@ -84,7 +85,8 @@ def extract_indicators(text: str) -> dict:
     
     if raw_urls:
         all_whitelisted = True
-        for url in raw_urls:
+        # حظر معالجة أكثر من 5 روابط في رسالة واحدة لمنع استهلاك خادم التطبيق
+        for url in raw_urls[:5]:
             real_url = unshorten_url(url)
             indicators["urls"].append(real_url)
             
@@ -94,13 +96,13 @@ def extract_indicators(text: str) -> dict:
                 clean_domain = domain.replace("www.", "")
                 indicators["domains"].append(clean_domain)
                 
-                # التحقق مما إذا كان النطاق الحالي ينتمي للقائمة البيضاء
-                is_current_safe = clean_domain in GLOBAL_WHITELIST or any(clean_domain.endswith("." + white_dom) for white_dom in GLOBAL_WHITELIST)
+                is_current_safe = clean_domain in GLOBAL_WHITELIST or any(
+                    clean_domain.endswith("." + white_dom) for white_dom in GLOBAL_WHITELIST
+                )
                 if not is_current_safe:
                     all_whitelisted = False
         
-        # تصبح المنظومة معفية كلياً فقط إذا كانت جميع الروابط المسحوبة موثوقة وعالمية
-        indicators["is_whitelisted"] = all_whitelisted
+        indicators["is_whitelisted"] = all_whitelisted if indicators["domains"] else False
 
     for word in urgency_keywords:
         if word in text.lower():
@@ -117,7 +119,7 @@ def check_url_reputation(domain: str) -> dict:
     url = f"https://www.virustotal.com/api/v3/domains/{domain}"
     headers = {"accept": "application/json", "x-apikey": api_key}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=6)
         if response.status_code == 200:
             data = response.json()
             stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
@@ -126,7 +128,9 @@ def check_url_reputation(domain: str) -> dict:
                 "suspicious": stats.get("suspicious", 0),
                 "harmless": stats.get("harmless", 0)
             }
-        return {"error": "لا توجد بيانات متاحة لهذا الرابط حالياً."}
+        elif response.status_code == 429:
+            return {"error": "تم تجاوز حد الطلبات المسموح به لـ VirusTotal حالياً."}
+        return {"error": f"لا توجد بيانات متاحة للنطاق {domain} حالياً."}
     except Exception:
         return {"error": "خطأ في الاتصال بفحص الروابط الخارجي."}
 
@@ -172,8 +176,8 @@ def translate_via_gemini(text_to_translate: str) -> str:
     except Exception:
         return "تعذر إتمام الترجمة التلقائية حالياً."
 
-def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
-    """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة (3%، 50%، 98%)."""
+def make_final_decision(local_ind: dict, api_res_list: list, llm_res: dict) -> dict:
+    """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة بعد دمج فحوصات كافة الروابط."""
     if local_ind.get("is_whitelisted", False):
         return {
             "status": "safe", 
@@ -189,13 +193,15 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
         reason = llm_res.get("reason", "لا توجد تفاصيل إضافية.")
 
     is_api_malicious = False
-    if api_res and "error" not in api_res and "notice" not in api_res:
-        if api_res.get("malicious", 0) > 0 or api_res.get("suspicious", 0) > 0:
-            is_api_malicious = True
+    for res in api_res_list:
+        if res and "error" not in res and "notice" not in res:
+            if res.get("malicious", 0) > 0 or res.get("suspicious", 0) > 0:
+                is_api_malicious = True
+                break
 
     if is_api_malicious:
         final_status = "dangerous"
-        reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
+        reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر فحص السمعة الموسع VirusTotal للروابط المرفقة)."
 
     if final_status == "dangerous":
         safety_score = 3   
@@ -212,36 +218,14 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
     
-    st.components.v1.html("""
-    <script>
-    const manifest = {
-      "name": "منظومة تحليل التهديدات الذكية",
-      "short_name": "محلل التهديدات",
-      "start_url": window.location.href,
-      "display": "standalone",
-      "background_color": "#1E1E2F",
-      "theme_color": "#007BFF",
-      "description": "تطبيق ذكي لفحص وتحليل الروابط والرسائل الاحتيالية بـ 3 طبقات حماية.",
-      "icons": [{"src": "https://cdn-icons-png.flaticon.com/512/1041/1041844.png", "sizes": "512x512", "type": "image/png"}]
-    };
-    const stringManifest = JSON.stringify(manifest);
-    const blob = new Blob([stringManifest], {type: 'application/json'});
-    const manifestURL = URL.createObjectURL(blob);
-    let link = document.createElement('link');
-    link.rel = 'manifest'; link.href = manifestURL; document.head.appendChild(link);
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('data:text/javascript;base64,c2VsZi5hZGRFdmVudExpc3RlbmVyKCdmZXRjaCcsIGZ1bmN0aW9uKGV2ZW50KSB7fSk7')
-      .then(() => console.log('PWA Service Worker Active!'));
-    }
-    </script>
-    """, height=0)
-
+    # تهيئة متغيرات الجلسة للحفاظ على استقرار المدخلات والمخرجات
     if "report_ready" not in st.session_state:
         st.session_state["report_ready"] = False
         st.session_state["status"] = ""
         st.session_state["safety_score"] = 0 
         st.session_state["reason_ar"] = ""
         st.session_state["speech_text"] = ""
+        st.session_state["input_text"] = ""
     
     if "show_accessibility_menu" not in st.session_state:
         st.session_state["show_accessibility_menu"] = False
@@ -262,14 +246,20 @@ def main():
                         indicators = extract_indicators(quick_input)
                         
                         if indicators.get("is_whitelisted", False):
-                            api_result = {"notice": "مدرج في القائمة البيضاء."}
+                            api_results = [{"notice": "مدرج في القائمة البيضاء."}]
                             llm_result = {"status": "safe", "reason": "قائمة بيضاء"}
                         else:
-                            # تأمين استدعاء السمعة: فحص ما إذا كان هناك نطاقات مستخرجة لمنع الـ IndexError
-                            api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                            # حماية الـ Rate Limit عبر إضافة فاصل زمني 0.5 ثانية بين استدعاء النطاقات
+                            api_results = []
+                            for d in indicators["domains"]:
+                                api_results.append(check_url_reputation(d))
+                                time.sleep(0.5)
+                            if not indicators["domains"]:
+                                api_results = [{"notice": "لا توجد روابط خارجية."}]
+                                
                             llm_result = analyze_with_llm(indicators)
                             
-                        final_report = make_final_decision(indicators, api_result, llm_result)
+                        final_report = make_final_decision(indicators, api_results, llm_result)
                         
                         st.session_state["report_ready"] = True
                         st.session_state["status"] = final_report["status"]
@@ -291,11 +281,12 @@ def main():
             with col1:
                 if st.button("🔊 استمع لنتيجة الفحص (صوتياً)", use_container_width=True):
                     if st.session_state["report_ready"]:
-                        clean_text = st.session_state["speech_text"] + " والسبب هو: " + st.session_state["reason_ar"].replace('"', "'")
+                        full_speech_payload = st.session_state["speech_text"] + " والسبب هو: " + st.session_state["reason_ar"]
+                        json_payload = json.dumps(full_speech_payload, ensure_ascii=False)
                         st.components.v1.html(f"""
                             <script>
                             window.speechSynthesis.cancel();
-                            var msg = new SpeechSynthesisUtterance("{clean_text}");
+                            var msg = new SpeechSynthesisUtterance({json_payload});
                             msg.lang = 'ar-SA';
                             window.speechSynthesis.speak(msg);
                             </script>
@@ -316,15 +307,14 @@ def main():
     st.subheader("🖥️ واجهة الفحص التفصيلية ودعم رفع الملفات")
     
     uploaded_file = st.file_uploader("📂 يمكنك رفع ملف بريد إلكتروني أو نصي لفحصه مباشرة:", type=["txt", "eml"])
-    file_content = ""
     if uploaded_file is not None:
         try:
-            file_content = uploaded_file.read().decode("utf-8")
+            st.session_state["input_text"] = uploaded_file.read().decode("utf-8")
             st.success("✅ تم تحميل محتوى الملف بنجاح وقراءته برمجياً!")
         except Exception:
             st.error("❌ حدث خطأ أثناء قراءة ترميز الملف، يرجى التأكد أنه بصيغة نصية سليمة.")
 
-    user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", value=file_content, height=140)
+    user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", value=st.session_state["input_text"], height=140)
     
     if st.button("تحليل موسع وشامل"):
         if user_input.strip():
@@ -332,14 +322,19 @@ def main():
                 indicators = extract_indicators(user_input)
                 
                 if indicators.get("is_whitelisted", False):
-                    api_result = {"notice": "مدرج في القائمة البيضاء."}
+                    api_results = [{"notice": "مدرج في القائمة البيضاء."}]
                     llm_result = {"status": "safe", "reason": "قائمة بيضاء"}
                 else:
-                    # تأمين استدعاء السمعة هنا أيضاً لمنع الـ IndexError في التحليل الموسع
-                    api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                    api_results = []
+                    for d in indicators["domains"]:
+                        api_results.append(check_url_reputation(d))
+                        time.sleep(0.5)
+                    if not indicators["domains"]:
+                        api_results = [{"notice": "لا توجد روابط خارجية."}]
+                        
                     llm_result = analyze_with_llm(indicators)
                     
-                final_report = make_final_decision(indicators, api_result, llm_result)
+                final_report = make_final_decision(indicators, api_results, llm_result)
                 
                 st.session_state["report_ready"] = True
                 st.session_state["status"] = final_report["status"]
