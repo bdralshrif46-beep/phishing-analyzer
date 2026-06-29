@@ -62,22 +62,29 @@
 ### التثبيت:
 ```bash
 pip install streamlit requests google-genai
-
+-----
+```
 ضبط مفاتيح البيئة (Environment Variables):
 يجب ضبط المفاتيح في النظام كمتغيرات بيئة لحمايتها:
 
 Windows:
 
 DOS
+```bash
 set GEMINI_API_KEY="your_key"
 set VIRUSTOTAL_API_KEY="your_key"
+```
 Linux / macOS:
 
 Bash
+```bash
 export GEMINI_API_KEY="your_key"
 export VIRUSTOTAL_API_KEY="your_key"
+```
 التشغيل:
 Bash
+```bash
 streamlit run app.py
+```
 ⚖️ 7. الترخيص وإخلاء المسؤولية (Disclaimer)
 هذه المنظومة مصممة للأغراض التعليمية وفحص الأمن السيبراني الوقائي ومشاريع التطوير المتقدمة، والاستخدام يقع تحت مسؤولية المستخدم لحماية أصوله الرقمية طبقاً لأحدث معايير الأمان لعام 2026.
