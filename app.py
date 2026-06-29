@@ -2,12 +2,15 @@ import os
 import re
 import json
 import time
+import threading
 import requests
 import streamlit as st
-from google import genai
+import google.genai as genai
 from google.genai import types
 
-# اسم ملف قاعدة المعرفة المحلية المخصص لتخزين الكلمات الاحتيالية المكتشفة ديناميكياً
+# إنشاء قفل (Lock) لمنع تضارب الكتابة في ملف قاعدة المعرفة عند الفحوصات المتزامنة من عدة مستخدمين
+file_lock = threading.Lock()
+
 KNOWLEDGE_BASE_FILE = "knowledge_base.json"
 
 # القائمة البيضاء المحلية للنطاقات العالمية الموثوقة لمنع الإنذارات الكاذبة وتوفير الطلبات
@@ -18,7 +21,7 @@ GLOBAL_WHITELIST = {
 }
 
 def load_knowledge_base():
-    """تحميل قاعدة المعرفة المحلية (الكلمات المفتاحية الافتراضية أو المحدثة)."""
+    """تحميل قاعدة المعرفة المحلية بأمان (الكلمات المفتاحية الافتراضية أو المحدثة)."""
     default_keywords = [
         "عاجل", "تحديث", "حسابك مجمد", "حسابك موقوف", "اضغط هنا", "فورا", "قفل", "حظر", "بطاقتك محظورة", 
         "انقر هنا", "تحقق من حسابك", "تأكيد الهوية", "ربحت", "جائزة", "عقد عمل", "بريد طارئ", "تسجيل الدخول", 
@@ -33,28 +36,33 @@ def load_knowledge_base():
     ]
     if os.path.exists(KNOWLEDGE_BASE_FILE):
         try:
-            with open(KNOWLEDGE_BASE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("urgency_keywords", default_keywords)
+            with file_lock:
+                with open(KNOWLEDGE_BASE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("urgency_keywords", default_keywords)
         except Exception:
             return default_keywords
     return default_keywords
 
 def save_knowledge_base(keywords):
-    """حفظ وتحديث قاعدة المعرفة مع منع التكرار."""
+    """حفظ وتحديث قاعدة المعرفة باستخدام خيط آمن (Thread-Safe) لمنع تلف الملف."""
     try:
-        with open(KNOWLEDGE_BASE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"urgency_keywords": list(set(keywords))}, f, ensure_ascii=False, indent=4)
+        with file_lock:
+            with open(KNOWLEDGE_BASE_FILE, "w", encoding="utf-8") as f:
+                json.dump({"urgency_keywords": list(set(keywords))}, f, ensure_ascii=False, indent=4)
     except Exception:
         pass
 
 def unshorten_url(url: str) -> str:
-    """تتبع قفزات إعادة التوجيه المتتالية (حتى 5 مستويات) للوصول إلى الرابط النهائي الحقيقي."""
+    """تتبع قفزات إعادة التوجيه المتتالية للوصول إلى الرابط النهائي الحقيقي بأمان مع محاكاة متصفح حقيقي."""
     current_url = url
-    max_redirects = 3  # تقليل مستويات التوجيه للحفاظ على سرعة الأداء ومنع الـ Timeouts
+    max_redirects = 3 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
         for _ in range(max_redirects):
-            response = requests.head(current_url, allow_redirects=False, timeout=3)
+            response = requests.head(current_url, allow_redirects=False, headers=headers, timeout=2.5)
             if 300 <= response.status_code < 400 and "Location" in response.headers:
                 next_url = response.headers["Location"]
                 if next_url.startswith("/"):
@@ -85,23 +93,24 @@ def extract_indicators(text: str) -> dict:
     
     if raw_urls:
         all_whitelisted = True
-        # حظر معالجة أكثر من 5 روابط في رسالة واحدة لمنع استهلاك خادم التطبيق
+        # معالجة حتى 5 روابط لمنع استهلاك الخادم
         for url in raw_urls[:5]:
             real_url = unshorten_url(url)
             indicators["urls"].append(real_url)
             
-            domain_match = re.search(r'https?://([^/]+)', real_url)
+            domain_match = re.search(r'https?://([^/:\s]+)', real_url)
             if domain_match:
                 domain = domain_match.group(1).lower()
                 clean_domain = domain.replace("www.", "")
                 indicators["domains"].append(clean_domain)
                 
+                # حماية صارمة لمنع الالتفاف عبر النطاقات الفرعية الخبيثة
                 is_current_safe = clean_domain in GLOBAL_WHITELIST or any(
                     clean_domain.endswith("." + white_dom) for white_dom in GLOBAL_WHITELIST
                 )
                 if not is_current_safe:
                     all_whitelisted = False
-        
+                    
         indicators["is_whitelisted"] = all_whitelisted if indicators["domains"] else False
 
     for word in urgency_keywords:
@@ -119,7 +128,7 @@ def check_url_reputation(domain: str) -> dict:
     url = f"https://www.virustotal.com/api/v3/domains/{domain}"
     headers = {"accept": "application/json", "x-apikey": api_key}
     try:
-        response = requests.get(url, headers=headers, timeout=6)
+        response = requests.get(url, headers=headers, timeout=5)
         if response.status_code == 200:
             data = response.json()
             stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
@@ -135,16 +144,21 @@ def check_url_reputation(domain: str) -> dict:
         return {"error": "خطأ في الاتصال بفحص الروابط الخارجي."}
 
 def analyze_with_llm(indicators: dict) -> dict:
-    """الطبقة الثالثة: التحليل السياقي وجلب القرارات عبر Gemini 2.5 Flash."""
+    """الطبقة الثالثة: التحليل السياقي وجلب القرارات عبر جيل Gemini التحديثي الجديد."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return {"error": "مفتاح الـ API الخاص بـ Gemini غير مضبوط."}
     try:
-        with open("prompts.json", "r", encoding="utf-8") as f:
-            prompts = json.load(f)
-        base_prompt = prompts["phishing_analysis_prompt"]
+        if os.path.exists("prompts.json"):
+            with open("prompts.json", "r", encoding="utf-8") as f:
+                prompts = json.load(f)
+            base_prompt = prompts.get("phishing_analysis_prompt", "Analyze this data: {indicators}")
+        else:
+            base_prompt = "Analyze these indicators and return JSON with 'status' (safe/suspicious/dangerous), 'reason' (in Arabic), and 'discovered_urgency_keywords': {indicators}"
+            
         full_prompt = base_prompt.format(indicators=json.dumps(indicators, ensure_ascii=False))
         
+        # استخدام الاستدعاء والعميل الجديد المتوافق مع مكتبة google-genai المحدثة
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
@@ -153,7 +167,6 @@ def analyze_with_llm(indicators: dict) -> dict:
         )
         
         result_json = json.loads(response.text.strip())
-        
         new_keywords = result_json.get("discovered_urgency_keywords", [])
         if new_keywords:
             current_keywords = load_knowledge_base()
@@ -177,7 +190,7 @@ def translate_via_gemini(text_to_translate: str) -> str:
         return "تعذر إتمام الترجمة التلقائية حالياً."
 
 def make_final_decision(local_ind: dict, api_res_list: list, llm_res: dict) -> dict:
-    """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة بعد دمج فحوصات كافة الروابط."""
+    """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة."""
     if local_ind.get("is_whitelisted", False):
         return {
             "status": "safe", 
@@ -218,19 +231,18 @@ def make_final_decision(local_ind: dict, api_res_list: list, llm_res: dict) -> d
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
     
-    # تهيئة متغيرات الجلسة للحفاظ على استقرار المدخلات والمخرجات
+    # تهيئة متغيرات الحالة للجلسة بشكل آمن وثابت
     if "report_ready" not in st.session_state:
         st.session_state["report_ready"] = False
         st.session_state["status"] = ""
         st.session_state["safety_score"] = 0 
         st.session_state["reason_ar"] = ""
         st.session_state["speech_text"] = ""
-        st.session_state["input_text"] = ""
     
     if "show_accessibility_menu" not in st.session_state:
         st.session_state["show_accessibility_menu"] = False
 
-    st.title("🛡️ منظومة تحليل التهديدات الذكية (النسخة الاحترافية المحدثة)")
+    st.title("🛡️ منظومة تحليل التهديدات الذكية (النسخة الاحترافية المعتمدة)")
     
     if st.button("♿ لوحة الوصول السريع وتسهيل الوصول (افتح هنا)", use_container_width=True):
         st.session_state["show_accessibility_menu"] = not st.session_state["show_accessibility_menu"]
@@ -249,7 +261,6 @@ def main():
                             api_results = [{"notice": "مدرج في القائمة البيضاء."}]
                             llm_result = {"status": "safe", "reason": "قائمة بيضاء"}
                         else:
-                            # حماية الـ Rate Limit عبر إضافة فاصل زمني 0.5 ثانية بين استدعاء النطاقات
                             api_results = []
                             for d in indicators["domains"]:
                                 api_results.append(check_url_reputation(d))
@@ -307,14 +318,20 @@ def main():
     st.subheader("🖥️ واجهة الفحص التفصيلية ودعم رفع الملفات")
     
     uploaded_file = st.file_uploader("📂 يمكنك رفع ملف بريد إلكتروني أو نصي لفحصه مباشرة:", type=["txt", "eml"])
+    
+    # معالجة رفع الملفات بشكل مستقر دون التسبب في تداخل قيم الـ Streamlit State
     if uploaded_file is not None:
         try:
-            st.session_state["input_text"] = uploaded_file.read().decode("utf-8")
-            st.success("✅ تم تحميل محتوى الملف بنجاح وقراءته برمجياً!")
+            file_data = uploaded_file.read().decode("utf-8")
+            if "last_uploaded_data" not in st.session_state or st.session_state["last_uploaded_data"] != file_data:
+                st.session_state["last_uploaded_data"] = file_data
+                st.session_state["main_text_input"] = file_data
+                st.rerun()
         except Exception:
             st.error("❌ حدث خطأ أثناء قراءة ترميز الملف، يرجى التأكد أنه بصيغة نصية سليمة.")
 
-    user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", value=st.session_state["input_text"], height=140)
+    # صندوق النص الرئيسي مع آلية الـ Key الموحد
+    user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", key="main_text_input", height=140)
     
     if st.button("تحليل موسع وشامل"):
         if user_input.strip():
@@ -340,7 +357,6 @@ def main():
                 st.session_state["status"] = final_report["status"]
                 st.session_state["safety_score"] = final_report["safety_score"]
                 st.session_state["reason_ar"] = final_report["reason"]
-                st.session_state["speech_text"] = f"تم تحديث النتيجة بناءً على التحليل الموسع الحالي."
         else:
             st.warning("الرجاء كتابة نص أو رفع ملف أولاً.")
 
