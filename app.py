@@ -9,6 +9,13 @@ from google.genai import types
 # اسم ملف قاعدة المعرفة المحلية المخصص لتخزين الكلمات الاحتيالية المكتشفة ديناميكياً
 KNOWLEDGE_BASE_FILE = "knowledge_base.json"
 
+# [ميزة 3] القائمة البيضاء المحلية للنطاقات العالمية الموثوقة لمنع الإنذارات الكاذبة وتوفير الطلبات
+GLOBAL_WHITELIST = {
+    "google.com", "microsoft.com", "apple.com", "github.com", "linkedin.com", 
+    "twitter.com", "x.com", "facebook.com", "instagram.com", "gmail.com",
+    "outlook.com", "amazon.com", "netflix.com", "wikipedia.org", "streamlit.io"
+}
+
 def load_knowledge_base():
     """تحميل قاعدة المعرفة المحلية (الكلمات المفتاحية الافتراضية أو المحدثة)."""
     default_keywords = [
@@ -41,11 +48,26 @@ def save_knowledge_base(keywords):
         pass
 
 def unshorten_url(url: str) -> str:
-    """تتبع الروابط المختصرة ومعرفة الرابط الحقيقي الأصلي لتجنب الخداع الأمني."""
+    """
+    [ميزة 2] تتبع الروابط متعدد المستويات (Multi-Hop Redirection Tracking):
+    تتبع قفزات إعادة التوجيه المتتالية (حتى 5 مستويات) للوصول إلى الرابط النهائي الحقيقي.
+    """
+    current_url = url
+    max_redirects = 5
     try:
-        # إرسال طلب HEAD لتتبع التوجيهات بدون تحميل محتوى الصفحة كاملاً سرعةً وأماناً
-        response = requests.head(url, allow_redirects=True, timeout=5)
-        return response.url
+        for _ in range(max_redirects):
+            response = requests.head(current_url, allow_redirects=False, timeout=4)
+            if 300 <= response.status_code < 400 and "Location" in response.headers:
+                next_url = response.headers["Location"]
+                # معالجة الروابط النسبية
+                if next_url.startswith("/"):
+                    from urllib.parse import urljoin
+                    current_url = urljoin(current_url, next_url)
+                else:
+                    current_url = next_url
+            else:
+                break
+        return current_url
     except Exception:
         return url
 
@@ -57,23 +79,28 @@ def extract_indicators(text: str) -> dict:
         "urls": [],
         "domains": [],
         "has_urgency_words": False,
-        "urgency_keywords": urgency_keywords
+        "urgency_keywords": urgency_keywords,
+        "is_whitelisted": False  # مؤشر لمعرفة ما إذا كان الرابط في القائمة البيضاء
     }
     
-    # استخراج الروابط الأولية بالـ Regex
     raw_urls = re.findall(r'(https?://[^\s]+)', text)
     indicators["original_urls"] = raw_urls
     
-    # فحص وتتبع كل رابط (كشف الروابط المختصرة)
     for url in raw_urls:
         real_url = unshorten_url(url)
         indicators["urls"].append(real_url)
         
         domain_match = re.search(r'https?://([^/]+)', real_url)
         if domain_match:
-            indicators["domains"].append(domain_match.group(1))
+            domain = domain_match.group(1).lower()
+            # تنظيف النطاق الفرعي مثل www.
+            clean_domain = domain.replace("www.", "")
+            indicators["domains"].append(clean_domain)
             
-    # فحص كلمات التخويف والإلحاح
+            # [ميزة 3] التحقق من القائمة البيضاء
+            if clean_domain in GLOBAL_WHITELIST or any(clean_domain.endswith("." + white_dom) for white_dom in GLOBAL_WHITELIST):
+                indicators["is_whitelisted"] = True
+            
     for word in urgency_keywords:
         if word in text.lower():
             indicators["has_urgency_words"] = True
@@ -103,7 +130,7 @@ def check_url_reputation(domain: str) -> dict:
         return {"error": "خطأ في الاتصال بفحص الروابط الخارجي."}
 
 def analyze_with_llm(indicators: dict) -> dict:
-    """الطبقة الثالثة: التحليل السياقي المستمر وجلب القرارات بصيغة JSON عبر Gemini 2.5 Flash."""
+    """الطبقة الثالثة: التحليل السياقي وجلب القرارات عبر Gemini 2.5 Flash."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return {"error": "مفتاح الـ API الخاص بـ Gemini غير مضبوط."}
@@ -146,6 +173,14 @@ def translate_via_gemini(text_to_translate: str) -> str:
 
 def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
     """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة (3%، 50%، 98%)."""
+    # [ميزة 3] تجاوز الفحص إذا كان النطاق مدرجاً في القائمة البيضاء وحالته آمنة كلياً
+    if local_ind.get("is_whitelisted", False):
+        return {
+            "status": "safe", 
+            "safety_score": 98, 
+            "reason": "تم تخطي الفحص الخارجي بنجاح لأن النطاق المستهدف مدرج ضمن القائمة البيضاء المحلية للنطاقات العالمية الموثوقة والمؤمنة."
+        }
+
     if "error" in llm_res:
         final_status = "suspicious" if local_ind["has_urgency_words"] else "safe"
         reason = llm_res["error"]
@@ -162,7 +197,6 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
         final_status = "dangerous"
         reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
 
-    # احتساب مؤشر السلامة الرقمية العكسي بدقة بناء على الحالة الأمنية
     if final_status == "dangerous":
         safety_score = 3   
     elif final_status == "suspicious":
@@ -223,14 +257,21 @@ def main():
     if st.session_state["show_accessibility_menu"]:
         with st.expander("⚡ مركز الوصول السريع (المتحدث، المترجم، وفحص الرابط المباشر)", expanded=True):
             st.markdown("#### 🎯 أدخل الرابط أو النص هنا للفحص السريع:")
-            quick_input = st.text_input("رابط سريع / نص بريد الكتروني:", placeholder="تلقائياً سيتم تتبع الروابط المختصرة...")
+            quick_input = st.text_input("رابط سريع / نص بريد الكتروني:", placeholder="تلقائياً سيتم تتبع الروابط المختصرة ومتعددة التوجيه...")
             
             if st.button("🔍 فحص سريع الآن", use_container_width=True):
                 if quick_input.strip():
                     with st.spinner("جاري كشف الروابط وتتبعها وفحص المؤشرات..."):
                         indicators = extract_indicators(quick_input)
-                        api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
-                        llm_result = analyze_with_llm(indicators)
+                        
+                        # [ميزة 3] التحقق الذكي لتجنب إرسال طلبات الـ API للنطاقات الآمنة في القائمة البيضاء
+                        if indicators.get("is_whitelisted", False):
+                            api_result = {"notice": "مدرج في القائمة البيضاء."}
+                            llm_result = {"status": "safe", "reason": "قائمة بيضاء"}
+                        else:
+                            api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                            llm_result = analyze_with_llm(indicators)
+                            
                         final_report = make_final_decision(indicators, api_result, llm_result)
                         
                         st.session_state["report_ready"] = True
@@ -278,7 +319,6 @@ def main():
     st.write("---")
     st.subheader("🖥️ واجهة الفحص التفصيلية ودعم رفع الملفات")
     
-    # ميزة رفع الملفات الجديدة (.txt أو .eml)
     uploaded_file = st.file_uploader("📂 يمكنك رفع ملف بريد إلكتروني أو نصي لفحصه مباشرة:", type=["txt", "eml"])
     file_content = ""
     if uploaded_file is not None:
@@ -288,15 +328,21 @@ def main():
         except Exception:
             st.error("❌ حدث خطأ أثناء قراءة ترميز الملف، يرجى التأكد أنه بصيغة نصية سليمة.")
 
-    # إذا تم رفع ملف، نضعه تلقائياً كقيمة افتراضية داخل صندوق النص
     user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", value=file_content, height=140)
     
     if st.button("تحليل موسع وشامل"):
         if user_input.strip():
-            with st.spinner("جاري تشغيل طبقات الحماية الثلاث وتتبع الروابط..."):
+            with st.spinner("جاري تشغيل طبقات الحماية وتتبع الروابط متعددة التوجيه..."):
                 indicators = extract_indicators(user_input)
-                api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
-                llm_result = analyze_with_llm(indicators)
+                
+                # [ميزة 3] تخطي طلبات الـ API إذا كان في القائمة البيضاء
+                if indicators.get("is_whitelisted", False):
+                    api_result = {"notice": "مدرج في القائمة البيضاء."}
+                    llm_result = {"status": "safe", "reason": "قائمة بيضاء"}
+                else:
+                    api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                    llm_result = analyze_with_llm(indicators)
+                    
                 final_report = make_final_decision(indicators, api_result, llm_result)
                 
                 st.session_state["report_ready"] = True
