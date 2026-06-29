@@ -105,17 +105,13 @@ def analyze_with_llm(indicators: dict) -> dict:
         return {"error": f"فشل في تحليل الذكاء الاصطناعي: {str(e)}"}
 
 def translate_via_gemini(text_to_translate: str) -> str:
-    """استخدام نفس نموذج جمناي لترجمة الحيثيات بدقة وبشكل فوري"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return "Error: Gemini API key missing for translation."
+        return "Error: Gemini API key missing."
     try:
         client = genai.Client(api_key=api_key)
         prompt = f"Translate the following Arabic cyber security analysis details into clear English:\n\n{text_to_translate}"
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return response.text.strip()
     except Exception:
         return "تعذر إتمام الترجمة التلقائية حالياً."
@@ -149,88 +145,146 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
     
-    st.title("🛡️ منظومة تحليل التهديدات الذكية (إصدار تسهيل الوصول الفعلي)")
+    # 📱 حقن الأكواد المسؤولة عن تحويل الموقع إلى تطبيق PWA قابل للتثبيت على الموبايل والكمبيوتر
+    st.components.v1.html("""
+    <script>
+    // إنشاء ملف تعريف التطبيق (Manifest) برمجياً ليتعرف عليه الهاتف كتطبيق مستقل
+    const manifest = {
+      "name": "منظومة تحليل التهديدات الذكية",
+      "short_name": "محلل التهديدات",
+      "start_url": window.location.href,
+      "display": "standalone",
+      "background_color": "#1E1E2F",
+      "theme_color": "#007BFF",
+      "description": "تطبيق ذكي لفحص وتحليل الروابط والرسائل الاحتيالية بـ 3 طبقات حماية.",
+      "icons": [
+        {
+          "src": "https://cdn-icons-png.flaticon.com/512/1041/1041844.png",
+          "sizes": "512x512",
+          "type": "image/png"
+        }
+      ]
+    };
     
-    # إدارة الجلسة لحفظ نتائج التقرير الأخير
+    const stringManifest = JSON.stringify(manifest);
+    const blob = new Blob([stringManifest], {type: 'application/json'});
+    const manifestURL = URL.createObjectURL(blob);
+    
+    let link = document.createElement('link');
+    link.rel = 'manifest';
+    link.href = manifestURL;
+    document.head.appendChild(link);
+    
+    // تسجيل الـ Service Worker لتفعيل بيئة عمل التطبيقات المستقلة
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('data:text/javascript;base64,c2VsZi5hZGRFdmVudExpc3RlbmVyKCdmZXRjaCcsIGZ1bmN0aW9uKGV2ZW50KSB7fSk7')
+      .then(() => console.log('PWA Service Worker Active!'));
+    }
+    </script>
+    """, height=0)
+
+    # تحضير متغيرات الجلسة (Session State)
     if "report_ready" not in st.session_state:
         st.session_state["report_ready"] = False
         st.session_state["status"] = ""
         st.session_state["confidence"] = 0
         st.session_state["reason_ar"] = ""
         st.session_state["speech_text"] = ""
-
-    st.subheader("🔍 مركز الفحص والتحليل")
-    user_input = st.text_area("ضع نص البريد الإلكتروني أو حدد الرابط المراد فصحه هنا:", height=150, placeholder="مثال: تحديث عاجل لحسابك البنكي اضغط هنا http://fake-link.com")
     
-    if st.button("ابدأ الفحص الأمني المتكامل", use_container_width=True):
-        if not user_input.strip():
-            st.warning("الرجاء إدخال نص أو رابط أولاً.")
-            return
-            
-        with st.spinner("جاري تشغيل طبقات الحماية الثلاث واستخراج المؤشرات..."):
-            indicators = extract_indicators(user_input)
-            api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
-            llm_result = analyze_with_llm(indicators)
-            final_report = make_final_decision(indicators, api_result, llm_result)
-            
-            # حفظ النتائج في الجلسة لتظل ثابتة عند الضغط على أزرار المساعدة
-            st.session_state["report_ready"] = True
-            st.session_state["status"] = final_report["status"]
-            st.session_state["confidence"] = final_report["confidence"]
-            st.session_state["reason_ar"] = final_report["reason"]
-            
-            if final_report["status"] == "dangerous":
-                st.session_state["speech_text"] = f"تنبيه أمني. النتيجة خطيرة جداً واحتِيال مؤكد بنسبة ثقة {final_report['confidence']} في المئة."
-            elif final_report["status"] == "suspicious":
-                st.session_state["speech_text"] = f"تنبيه. النتيجة مشبوهة وتحتوي على إشارات احتيال بنسبة ثقة {final_report['confidence']} في المئة."
-            else:
-                st.session_state["speech_text"] = f"النتيجة آمنة وطبيعية تماماً بنسبة ثقة {final_report['confidence']} في المئة."
+    if "show_accessibility_menu" not in st.session_state:
+        st.session_state["show_accessibility_menu"] = False
 
-    # ♿ عرض النتائج وأدوات تسهيل الوصول الحقيقية والفعالة 100%
+    st.title("🛡️ منظومة تحليل التهديدات الذكية (نسخة التطبيق المثبت PWA)")
+    
+    # ♿ لوحة الوصول السريع وتسهيل الوصول
+    if st.button("♿ لوحة الوصول السريع وتسهيل الوصول (افتح هنا)", use_container_width=True):
+        st.session_state["show_accessibility_menu"] = not st.session_state["show_accessibility_menu"]
+
+    if st.session_state["show_accessibility_menu"]:
+        with st.expander("⚡ مركز الوصول السريع (المتحدث، المترجم، وفحص الرابط المباشر)", expanded=True):
+            st.markdown("#### 🎯 أدخل الرابط أو النص هنا للفحص السريع:")
+            quick_input = st.text_input("رابط سريع / نص بريد الكتروني:", placeholder="ضع الرابط هنا واضغط فحص...")
+            
+            if st.button("🔍 فحص سريع الآن", use_container_width=True):
+                if quick_input.strip():
+                    with st.spinner("جاري فحص مؤشرات الرابط..."):
+                        indicators = extract_indicators(quick_input)
+                        api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                        llm_result = analyze_with_llm(indicators)
+                        final_report = make_final_decision(indicators, api_result, llm_result)
+                        
+                        st.session_state["report_ready"] = True
+                        st.session_state["status"] = final_report["status"]
+                        st.session_state["confidence"] = final_report["confidence"]
+                        st.session_state["reason_ar"] = final_report["reason"]
+                        
+                        if final_report["status"] == "dangerous":
+                            st.session_state["speech_text"] = f"تنبيه أمني. النتيجة خطيرة جداً واحتِيال مؤكد بنسبة ثقة {final_report['confidence']} في المئة."
+                        elif final_report["status"] == "suspicious":
+                            st.session_state["speech_text"] = f"تنبيه. النتيجة مشبوهة وتحتوي على إشارات احتيال بنسبة ثقة {final_report['confidence']} في المئة."
+                        else:
+                            st.session_state["speech_text"] = f"النتيجة آمنة وطبيعية تماماً بنسبة ثقة {final_report['confidence']} في المئة."
+                else:
+                    st.warning("يرجى كتابة أو لصق شيء أولاً.")
+
+            st.markdown("----")
+            st.markdown("#### 🛠️ أدوات المساعدة الصوتية واللغوية الفورية:")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔊 استمع لنتيجة الفحص (صوتياً)", use_container_width=True):
+                    if st.session_state["report_ready"]:
+                        clean_text = st.session_state["speech_text"] + " والسبب هو: " + st.session_state["reason_ar"].replace('"', "'")
+                        st.components.v1.html(f"""
+                            <script>
+                            window.speechSynthesis.cancel();
+                            var msg = new SpeechSynthesisUtterance("{clean_text}");
+                            msg.lang = 'ar-SA';
+                            window.speechSynthesis.speak(msg);
+                            </script>
+                        """, height=0)
+                        st.toast("🔊 جاري نطق التقرير صوتاً...")
+                    else:
+                        st.warning("الرجاء فحص رابط أولاً داخل مركز الوصول السريع لتتمكن من سماعه.")
+            
+            with col2:
+                if st.button("🌐 ترجمة الحيثيات للإنجليزية فوراً", use_container_width=True):
+                    if st.session_state["report_ready"]:
+                        with st.spinner("جاري الترجمة الفورية عبر Gemini..."):
+                            eng_text = translate_via_gemini(st.session_state["reason_ar"])
+                            st.success(f"🇬🇧 **English:** {eng_text}")
+                    else:
+                        st.warning("لا توجد نتائج مترجمة بعد، قم بعمل فحص سريع أولاً.")
+
+    # واجهة الإدخال التقليدية الكبيرة بالأسفل
+    st.write("---")
+    st.subheader("🖥️ واجهة الفحص التفصيلية الكاملة")
+    user_input = st.text_area("ضع نص البريد الإلكتروني الكلي هنا للتحليل الموسع:", height=120)
+    if st.button("تحليل موسع للبريد الكلي"):
+        if user_input.strip():
+            with st.spinner("جاري التحليل..."):
+                indicators = extract_indicators(user_input)
+                api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
+                llm_result = analyze_with_llm(indicators)
+                final_report = make_final_decision(indicators, api_result, llm_result)
+                st.session_state["report_ready"] = True
+                st.session_state["status"] = final_report["status"]
+                st.session_state["confidence"] = final_report["confidence"]
+                st.session_state["reason_ar"] = final_report["reason"]
+                st.session_state["speech_text"] = f"النتيجة تم تحديثها بناءً على الفحص الموسع."
+
+    # عرض التقرير النهائي الموحد
     if st.session_state["report_ready"]:
         st.write("---")
-        st.subheader("📊 التقرير النهائي وعوامل الأمان")
-        
+        st.subheader("📊 التقرير الأمني وعوامل الثقة")
         status = st.session_state["status"]
-        confidence = st.session_state["confidence"]
-        reason_ar = st.session_state["reason_ar"]
-        
         if status == "dangerous":
-            st.error(f"🚨 النتيجة: **خطير / احتيال مؤكد** (نسبة الثقة: {confidence}%)")
+            st.error(f"🚨 النتيجة: **خطير / احتيال مؤكد** (نسبة الثقة: {st.session_state['confidence']}%)")
         elif status == "suspicious":
-            st.warning(f"⚠️ النتيجة: **مشبوه ويحتوي على إشارات فيشينغ** (نسبة الثقة: {confidence}%)")
+            st.warning(f"⚠️ النتيجة: **مشبوه ويحتوي على إشارات فيشينغ** (نسبة الثقة: {st.session_state['confidence']}%)")
         else:
-            st.success(f"✅ النتيجة: **آمن وطبيعي** (نسبة الثقة: {confidence}%)")
-            
-        st.info(f"📝 **حيثيات الحكم الأمنية (بالعربية):** {reason_ar}")
-        
-        # 🛠️ قسم أدوات تسهيل الوصول الفعلي (أزرار بايثون صريحة)
-        st.write("---")
-        st.markdown("### ♿ أدوات تسهيل الوصول والتحكم الذكي (تفاعلية بالكامل)")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # زر النطق الصوتي الفعلي - يستدعي كود النطق الأصلي للمتصفح دون تداخل
-            if st.button("🔊 تشغيل القارئ الصوتي التلقائي المدمج", use_container_width=True):
-                clean_text = st.session_state["speech_text"] + " والسبب هو: " + reason_ar.replace('"', "'")
-                st.components.v1.html(f"""
-                    <script>
-                    window.speechSynthesis.cancel(); // إيقاف أي صوت سابق
-                    var msg = new SpeechSynthesisUtterance("{clean_text}");
-                    msg.lang = 'ar-SA';
-                    msg.rate = 0.9; // سرعة هادئة ومفهومة
-                    window.speechSynthesis.speak(msg);
-                    </script>
-                """, height=0)
-                st.toast("🔊 جاري نطق التقرير صوتاً الآن...")
-                
-        with col2:
-            # زر الترجمة الفورية الفعلي - يطلب من Gemini الترجمة الفورية ويعرضها فوراً
-            if st.button("🌐 ترجمة حيثيات التقرير ألياً إلى الإنجليزية", use_container_width=True):
-                with st.spinner("جاري الترجمة الفورية عبر الذكاء الاصطناعي..."):
-                    translated_text = translate_via_gemini(reason_ar)
-                    st.success(f"🇬🇧 **English Analysis:** {translated_text}")
+            st.success(f"✅ النتيجة: **آمن وطبيعي** (نسبة الثقة: {st.session_state['confidence']}%)")
+        st.info(f"📝 **حيثيات الحكم الأمنية:** {st.session_state['reason_ar']}")
 
 if __name__ == "__main__":
     main()
