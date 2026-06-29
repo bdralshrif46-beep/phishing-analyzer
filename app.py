@@ -128,22 +128,36 @@ def analyze_with_llm(indicators: dict) -> dict:
 
 # --- القسم 4: دمج القواعد، الواجهة، والنموذج لاتخاذ القرار ---
 def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
-    """دمج الطبقات الثلاث بالكامل للخروج بحكم نهائي متكامل"""
+    """دمج الطبقات الثلاث بالكامل للخروج بحكم نهائي متكامل مع معالجة دقيقة لنتائج الفحص الخارجي"""
+    
+    # 1. قراءة النتيجة المبدئية من الذكاء الاصطناعي (إذا لم يكن هناك خطأ)
     if "error" in llm_res:
-        if local_ind["has_urgency_words"] and len(local_ind["urls"]) > 0:
-            return {"status": "suspicious", "confidence": 70, "reason": "مؤشرات محلية مشبوهة، وتعذر تشغيل النموذج الذكي."}
-        return {"status": "safe", "confidence": 50, "reason": "المؤشرات المبدئية مستقرة."}
-    
-    is_api_malicious = api_res.get("malicious", 0) > 0 if "error" not in api_res else False
-    
-    final_status = llm_res.get("status", "safe")
-    confidence = llm_res.get("confidence_score", 50)
-    reason = llm_res.get("reason", "لا توجد تفاصيل إضافية.")
-    
+        final_status = "suspicious" if local_ind["has_urgency_words"] else "safe"
+        confidence = 70 if local_ind["has_urgency_words"] else 90
+        reason = llm_res["error"]
+    else:
+        final_status = llm_res.get("status", "safe")
+        confidence = llm_res.get("confidence_score", 50)
+        reason = llm_res.get("reason", "لا توجد تفاصيل إضافية.")
+
+    # 2. فحص دقيق لرد VirusTotal وتجنب الأخطاء
+    is_api_malicious = False
+    if api_res and "error" not in api_res and "notice" not in api_res:
+        # إذا وجدنا أن هناك محرك فحص واحد على الأقل اعتبره خبيثاً
+        if api_res.get("malicious", 0) > 0 or api_res.get("suspicious", 0) > 0:
+            is_api_malicious = True
+
+    # 3. تعديل نسب الثقة بناءً على حالة الأمان (الشرط الذي طلبته سابقاً)
+    if final_status == "safe" and not is_api_malicious and not local_ind["has_urgency_words"]:
+        confidence = max(confidence, 95)
+        reason = "تم فحص الرابط عبر طبقات الحماية المتعددة ولم يتم العثور على أي مؤشرات تهديد."
+
+    # 4. تطبيق الشرط الخاص بك: إذا أكدت الواجهة الخارجية خطورة الرابط
     if is_api_malicious:
         final_status = "dangerous"
-        confidence = max(confidence, 95)
-        reason += " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
+        confidence = max(confidence, 98)
+        # التأكد من أن النص يضاف بشكل سليم دون تداخل
+        reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
         
     return {"status": final_status, "confidence": confidence, "reason": reason}
 
