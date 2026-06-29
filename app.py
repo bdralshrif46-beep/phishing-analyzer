@@ -6,10 +6,11 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-# ملف قاعدة المعرفة المحلية للتعلم المستمر
+# اسم ملف قاعدة المعرفة المحلية المخصص لتخزين الكلمات الاحتيالية المكتشفة ديناميكياً
 KNOWLEDGE_BASE_FILE = "knowledge_base.json"
 
 def load_knowledge_base():
+    """تحميل قاعدة المعرفة المحلية (الكلمات المفتاحية الافتراضية أو المحدثة)."""
     default_keywords = [
         "عاجل", "تحديث", "حسابك مجمد", "حسابك موقوف", "اضغط هنا", "فورا", "قفل", "حظر", "بطاقتك محظورة", 
         "انقر هنا", "تحقق من حسابك", "تأكيد الهوية", "ربحت", "جائزة", "عقد عمل", "بريد طارئ", "تسجيل الدخول", 
@@ -32,26 +33,47 @@ def load_knowledge_base():
     return default_keywords
 
 def save_knowledge_base(keywords):
+    """حفظ وتحديث قاعدة المعرفة مع منع التكرار."""
     try:
         with open(KNOWLEDGE_BASE_FILE, "w", encoding="utf-8") as f:
             json.dump({"urgency_keywords": list(set(keywords))}, f, ensure_ascii=False, indent=4)
     except Exception:
         pass
 
+def unshorten_url(url: str) -> str:
+    """تتبع الروابط المختصرة ومعرفة الرابط الحقيقي الأصلي لتجنب الخداع الأمني."""
+    try:
+        # إرسال طلب HEAD لتتبع التوجيهات بدون تحميل محتوى الصفحة كاملاً سرعةً وأماناً
+        response = requests.head(url, allow_redirects=True, timeout=5)
+        return response.url
+    except Exception:
+        return url
+
 def extract_indicators(text: str) -> dict:
+    """الطبقة الأولى: استخراج الروابط وتتبعها، جلب النطاقات، وفحص كلمات الهندسة الاجتماعية."""
     urgency_keywords = load_knowledge_base()
     indicators = {
+        "original_urls": [],
         "urls": [],
         "domains": [],
         "has_urgency_words": False,
         "urgency_keywords": urgency_keywords
     }
-    urls = re.findall(r'(https?://[^\s]+)', text)
-    indicators["urls"] = urls
-    for url in urls:
-        domain_match = re.search(r'https?://([^/]+)', url)
+    
+    # استخراج الروابط الأولية بالـ Regex
+    raw_urls = re.findall(r'(https?://[^\s]+)', text)
+    indicators["original_urls"] = raw_urls
+    
+    # فحص وتتبع كل رابط (كشف الروابط المختصرة)
+    for url in raw_urls:
+        real_url = unshorten_url(url)
+        indicators["urls"].append(real_url)
+        
+        domain_match = re.search(r'https?://([^/]+)', real_url)
         if domain_match:
             indicators["domains"].append(domain_match.group(1))
+            
+    # فحص كلمات التخويف والإلحاح
     for word in urgency_keywords:
         if word in text.lower():
             indicators["has_urgency_words"] = True
@@ -59,9 +81,11 @@ def extract_indicators(text: str) -> dict:
     return indicators
 
 def check_url_reputation(domain: str) -> dict:
+    """الطبقة الثانية: فحص سمعة النطاق أمنياً عبر واجهة VirusTotal API."""
     api_key = os.environ.get("VIRUSTOTAL_API_KEY")
     if not api_key:
         return {"error": "مفتاح API الخاص بـ VirusTotal غير موجود."}
+    
     url = f"https://www.virustotal.com/api/v3/domains/{domain}"
     headers = {"accept": "application/json", "x-apikey": api_key}
     try:
@@ -79,6 +103,7 @@ def check_url_reputation(domain: str) -> dict:
         return {"error": "خطأ في الاتصال بفحص الروابط الخارجي."}
 
 def analyze_with_llm(indicators: dict) -> dict:
+    """الطبقة الثالثة: التحليل السياقي المستمر وجلب القرارات بصيغة JSON عبر Gemini 2.5 Flash."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return {"error": "مفتاح الـ API الخاص بـ Gemini غير مضبوط."}
@@ -94,7 +119,9 @@ def analyze_with_llm(indicators: dict) -> dict:
             contents=full_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
+        
         result_json = json.loads(response.text.strip())
+        
         new_keywords = result_json.get("discovered_urgency_keywords", [])
         if new_keywords:
             current_keywords = load_knowledge_base()
@@ -105,6 +132,7 @@ def analyze_with_llm(indicators: dict) -> dict:
         return {"error": f"فشل في تحليل الذكاء الاصطناعي: {str(e)}"}
 
 def translate_via_gemini(text_to_translate: str) -> str:
+    """ترجمة الحيثيات الأمنية التلقائية إلى الإنجليزية السيبرانية عبر Gemini."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return "Error: Gemini API key missing."
@@ -115,8 +143,9 @@ def translate_via_gemini(text_to_translate: str) -> str:
         return response.text.strip()
     except Exception:
         return "تعذر إتمام الترجمة التلقائية حالياً."
+
 def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
-    # قراءة الحالة المبدئية من تحليل الذكاء الاصطناعي
+    """اتخاذ القرار النهائي الموحد وحساب نسبة سلامة الرابط بدقة (3%، 50%، 98%)."""
     if "error" in llm_res:
         final_status = "suspicious" if local_ind["has_urgency_words"] else "safe"
         reason = llm_res["error"]
@@ -124,38 +153,34 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
         final_status = llm_res.get("status", "safe")
         reason = llm_res.get("reason", "لا توجد تفاصيل إضافية.")
 
-    # التحقق من فحص السمعة العالمي VirusTotal
     is_api_malicious = False
     if api_res and "error" not in api_res and "notice" not in api_res:
         if api_res.get("malicious", 0) > 0 or api_res.get("suspicious", 0) > 0:
             is_api_malicious = True
 
-    # إجبار الحالة لتكون خطيرة إذا أكد الفحص الخارجي ذلك
     if is_api_malicious:
         final_status = "dangerous"
         reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
 
-    # 📊 احتساب "نسبة سلامة وأمان الرابط" :
+    # احتساب مؤشر السلامة الرقمية العكسي بدقة بناء على الحالة الأمنية
     if final_status == "dangerous":
-        safety_score = 3  # نسبة أمان منخفضة وقليلة جداً (3%) لأن الرابط تخريبي
+        safety_score = 3   
     elif final_status == "suspicious":
-        safety_score = 50  # نسبة أمان متوسطة (50%) لوجود مؤشرات خطر
+        safety_score = 50  
     else:
-        # إذا كان آمناً ولم يجد الفحص الخارجي أو المحلي أي مشكلة
         if not is_api_malicious and not local_ind["has_urgency_words"]:
-            safety_score = 98  # درجة أمان عالية جداً (98%)
+            safety_score = 98  
         else:
-            safety_score = 85  # آمن لكن مع وجود بعض الملاحظات البسيطة
+            safety_score = 85  
 
     return {"status": final_status, "safety_score": safety_score, "reason": reason}
 
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
     
-    # 📱 حقن الأكواد المسؤولة عن تحويل الموقع إلى تطبيق PWA قابل للتثبيت على الموبايل والكمبيوتر
+    # 📱 كود تهيئة وتفعيل تطبيق الـ PWA ليكون مستقلاً وقابلاً للتثبيت
     st.components.v1.html("""
     <script>
-    // إنشاء ملف تعريف التطبيق (Manifest) برمجياً ليتعرف عليه الهاتف كتطبيق مستقل
     const manifest = {
       "name": "منظومة تحليل التهديدات الذكية",
       "short_name": "محلل التهديدات",
@@ -164,25 +189,13 @@ def main():
       "background_color": "#1E1E2F",
       "theme_color": "#007BFF",
       "description": "تطبيق ذكي لفحص وتحليل الروابط والرسائل الاحتيالية بـ 3 طبقات حماية.",
-      "icons": [
-        {
-          "src": "https://cdn-icons-png.flaticon.com/512/1041/1041844.png",
-          "sizes": "512x512",
-          "type": "image/png"
-        }
-      ]
+      "icons": [{"src": "https://cdn-icons-png.flaticon.com/512/1041/1041844.png", "sizes": "512x512", "type": "image/png"}]
     };
-    
     const stringManifest = JSON.stringify(manifest);
     const blob = new Blob([stringManifest], {type: 'application/json'});
     const manifestURL = URL.createObjectURL(blob);
-    
     let link = document.createElement('link');
-    link.rel = 'manifest';
-    link.href = manifestURL;
-    document.head.appendChild(link);
-    
-    // تسجيل الـ Service Worker لتفعيل بيئة عمل التطبيقات المستقلة
+    link.rel = 'manifest'; link.href = manifestURL; document.head.appendChild(link);
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('data:text/javascript;base64,c2VsZi5hZGRFdmVudExpc3RlbmVyKCdmZXRjaCcsIGZ1bmN0aW9uKGV2ZW50KSB7fSk7')
       .then(() => console.log('PWA Service Worker Active!'));
@@ -190,18 +203,18 @@ def main():
     </script>
     """, height=0)
 
-    # تحضير متغيرات الجلسة (Session State)
+    # تهيئة متغيرات الجلسة وتأمين استقرارها
     if "report_ready" not in st.session_state:
         st.session_state["report_ready"] = False
         st.session_state["status"] = ""
-        st.session_state["confidence"] = 0
+        st.session_state["safety_score"] = 0 
         st.session_state["reason_ar"] = ""
         st.session_state["speech_text"] = ""
     
     if "show_accessibility_menu" not in st.session_state:
         st.session_state["show_accessibility_menu"] = False
 
-    st.title("🛡️ منظومة تحليل التهديدات الذكية (نسخة التطبيق المثبت PWA)")
+    st.title("🛡️ منظومة تحليل التهديدات الذكية (النسخة الاحترافية المحدثة)")
     
     # ♿ لوحة الوصول السريع وتسهيل الوصول
     if st.button("♿ لوحة الوصول السريع وتسهيل الوصول (افتح هنا)", use_container_width=True):
@@ -210,11 +223,11 @@ def main():
     if st.session_state["show_accessibility_menu"]:
         with st.expander("⚡ مركز الوصول السريع (المتحدث، المترجم، وفحص الرابط المباشر)", expanded=True):
             st.markdown("#### 🎯 أدخل الرابط أو النص هنا للفحص السريع:")
-            quick_input = st.text_input("رابط سريع / نص بريد الكتروني:", placeholder="ضع الرابط هنا واضغط فحص...")
+            quick_input = st.text_input("رابط سريع / نص بريد الكتروني:", placeholder="تلقائياً سيتم تتبع الروابط المختصرة...")
             
             if st.button("🔍 فحص سريع الآن", use_container_width=True):
                 if quick_input.strip():
-                    with st.spinner("جاري فحص مؤشرات الرابط..."):
+                    with st.spinner("جاري كشف الروابط وتتبعها وفحص المؤشرات..."):
                         indicators = extract_indicators(quick_input)
                         api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
                         llm_result = analyze_with_llm(indicators)
@@ -222,21 +235,20 @@ def main():
                         
                         st.session_state["report_ready"] = True
                         st.session_state["status"] = final_report["status"]
-                        st.session_state["confidence"] = final_report["confidence"]
+                        st.session_state["safety_score"] = final_report["safety_score"]
                         st.session_state["reason_ar"] = final_report["reason"]
                         
                         if final_report["status"] == "dangerous":
-                            st.session_state["speech_text"] = f"تنبيه أمني. النتيجة خطيرة جداً واحتِيال مؤكد بنسبة ثقة {final_report['confidence']} في المئة."
+                            st.session_state["speech_text"] = f"تنبيه أمني. النتيجة خطيرة جداً واحتِيال مؤكد. مؤشر سلامة الرابط منخفض جداً ويساوي {final_report['safety_score']} في المئة."
                         elif final_report["status"] == "suspicious":
-                            st.session_state["speech_text"] = f"تنبيه. النتيجة مشبوهة وتحتوي على إشارات احتيال بنسبة ثقة {final_report['confidence']} في المئة."
+                            st.session_state["speech_text"] = f"تنبيه أمني. النتيجة مشبوهة ومقلقة. مؤشر سلامة الرابط متوسط ويساوي {final_report['safety_score']} في المئة."
                         else:
-                            st.session_state["speech_text"] = f"النتيجة آمنة وطبيعية تماماً بنسبة ثقة {final_report['confidence']} في المئة."
+                            st.session_state["speech_text"] = f"النتيجة آمنة تماماً. مؤشر سلامة الرابط مرتفع جداً ويساوي {final_report['safety_score']} في المئة."
                 else:
                     st.warning("يرجى كتابة أو لصق شيء أولاً.")
 
             st.markdown("----")
             st.markdown("#### 🛠️ أدوات المساعدة الصوتية واللغوية الفورية:")
-            
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("🔊 استمع لنتيجة الفحص (صوتياً)", use_container_width=True):
@@ -252,8 +264,7 @@ def main():
                         """, height=0)
                         st.toast("🔊 جاري نطق التقرير صوتاً...")
                     else:
-                        st.warning("الرجاء فحص رابط أولاً داخل مركز الوصول السريع لتتمكن من سماعه.")
-            
+                        st.warning("الرجاء فحص بريد أو رابط أولاً لسماعه.")
             with col2:
                 if st.button("🌐 ترجمة الحيثيات للإنجليزية فوراً", use_container_width=True):
                     if st.session_state["report_ready"]:
@@ -261,37 +272,58 @@ def main():
                             eng_text = translate_via_gemini(st.session_state["reason_ar"])
                             st.success(f"🇬🇧 **English:** {eng_text}")
                     else:
-                        st.warning("لا توجد نتائج مترجمة بعد، قم بعمل فحص سريع أولاً.")
+                        st.warning("لا توجد نتائج مترجمة بعد، قم بعمل فحص أولاً.")
 
-    # واجهة الإدخال التقليدية الكبيرة بالأسفل
+    # 🖥️ واجهة الفحص التفصيلية ودعم رفع الملفات
     st.write("---")
-    st.subheader("🖥️ واجهة الفحص التفصيلية الكاملة")
-    user_input = st.text_area("ضع نص البريد الإلكتروني الكلي هنا للتحليل الموسع:", height=120)
-    if st.button("تحليل موسع للبريد الكلي"):
+    st.subheader("🖥️ واجهة الفحص التفصيلية ودعم رفع الملفات")
+    
+    # ميزة رفع الملفات الجديدة (.txt أو .eml)
+    uploaded_file = st.file_uploader("📂 يمكنك رفع ملف بريد إلكتروني أو نصي لفحصه مباشرة:", type=["txt", "eml"])
+    file_content = ""
+    if uploaded_file is not None:
+        try:
+            file_content = uploaded_file.read().decode("utf-8")
+            st.success("✅ تم تحميل محتوى الملف بنجاح وقراءته برمجياً!")
+        except Exception:
+            st.error("❌ حدث خطأ أثناء قراءة ترميز الملف، يرجى التأكد أنه بصيغة نصية سليمة.")
+
+    # إذا تم رفع ملف، نضعه تلقائياً كقيمة افتراضية داخل صندوق النص
+    user_input = st.text_area("نص البريد الإلكتروني الكلي المراد تحليله:", value=file_content, height=140)
+    
+    if st.button("تحليل موسع وشامل"):
         if user_input.strip():
-            with st.spinner("جاري التحليل..."):
+            with st.spinner("جاري تشغيل طبقات الحماية الثلاث وتتبع الروابط..."):
                 indicators = extract_indicators(user_input)
                 api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
                 llm_result = analyze_with_llm(indicators)
                 final_report = make_final_decision(indicators, api_result, llm_result)
+                
                 st.session_state["report_ready"] = True
                 st.session_state["status"] = final_report["status"]
-                st.session_state["confidence"] = final_report["confidence"]
+                st.session_state["safety_score"] = final_report["safety_score"]
                 st.session_state["reason_ar"] = final_report["reason"]
-                st.session_state["speech_text"] = f"النتيجة تم تحديثها بناءً على الفحص الموسع."
+                st.session_state["speech_text"] = f"تم تحديث النتيجة بناءً على التحليل الموسع الحالي."
+        else:
+            st.warning("الرجاء كتابة نص أو رفع ملف أولاً.")
 
-    # عرض التقرير النهائي الموحد
+    # عرض التقرير ومؤشر السلامة المعدل
     if st.session_state["report_ready"]:
         st.write("---")
-        st.subheader("📊 التقرير الأمني وعوامل الثقة")
+        st.subheader("📊 التقرير الأمني ومؤشر السلامة الرقمية")
+        
         status = st.session_state["status"]
+        safety_score = st.session_state["safety_score"]  
+        reason_ar = st.session_state["reason_ar"]
+        
         if status == "dangerous":
-            st.error(f"🚨 النتيجة: **خطير / احتيال مؤكد** (نسبة الثقة: {st.session_state['confidence']}%)")
+            st.error(f"🚨 النتيجة: **خطير / احتيال مؤكد** (مؤشر سلامة الرابط: {safety_score}%) - الرابط غير آمن تماماً!")
         elif status == "suspicious":
-            st.warning(f"⚠️ النتيجة: **مشبوه ويحتوي على إشارات فيشينغ** (نسبة الثقة: {st.session_state['confidence']}%)")
+            st.warning(f"⚠️ النتيجة: **مشبوه ويحتوي على إشارات فيشينغ** (مؤشر سلامة الرابط: {safety_score}%) - يرجى الحذر.")
         else:
-            st.success(f"✅ النتيجة: **آمن وطبيعي** (نسبة الثقة: {st.session_state['confidence']}%)")
-        st.info(f"📝 **حيثيات الحكم الأمنية:** {st.session_state['reason_ar']}")
+            st.success(f"✅ النتيجة: **آمن وطبيعي** (مؤشر سلامة الرابط: {safety_score}%) - يمكنك استخدامه باطمئنان.")
+            
+        st.info(f"📝 **حيثيات الحكم الأمنية:** {reason_ar}")
 
 if __name__ == "__main__":
     main()
