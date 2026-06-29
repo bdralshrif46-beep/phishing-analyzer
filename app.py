@@ -115,32 +115,39 @@ def translate_via_gemini(text_to_translate: str) -> str:
         return response.text.strip()
     except Exception:
         return "تعذر إتمام الترجمة التلقائية حالياً."
-
 def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
+    # قراءة الحالة المبدئية من تحليل الذكاء الاصطناعي
     if "error" in llm_res:
         final_status = "suspicious" if local_ind["has_urgency_words"] else "safe"
-        confidence = 70 if local_ind["has_urgency_words"] else 90
         reason = llm_res["error"]
     else:
         final_status = llm_res.get("status", "safe")
-        confidence = llm_res.get("confidence_score", 50)
         reason = llm_res.get("reason", "لا توجد تفاصيل إضافية.")
 
+    # التحقق من فحص السمعة العالمي VirusTotal
     is_api_malicious = False
     if api_res and "error" not in api_res and "notice" not in api_res:
         if api_res.get("malicious", 0) > 0 or api_res.get("suspicious", 0) > 0:
             is_api_malicious = True
 
-    if final_status == "safe" and not is_api_malicious and not local_ind["has_urgency_words"]:
-        confidence = max(confidence, 95)
-        reason = "تم فحص الرابط عبر طبقات الحماية المتعددة ولم يتم العثور على أي مؤشرات تهديد أولية."
-
+    # إجبار الحالة لتكون خطيرة إذا أكد الفحص الخارجي ذلك
     if is_api_malicious:
         final_status = "dangerous"
-        confidence = max(confidence, 98)
         reason = str(reason) + " (تم تأكيد التهديد أمنياً عبر الفحص الخارجي للسمعة VirusTotal)."
-        
-    return {"status": final_status, "confidence": confidence, "reason": reason}
+
+    # 📊 احتساب "نسبة سلامة وأمان الرابط" :
+    if final_status == "dangerous":
+        safety_score = 3  # نسبة أمان منخفضة وقليلة جداً (3%) لأن الرابط تخريبي
+    elif final_status == "suspicious":
+        safety_score = 50  # نسبة أمان متوسطة (50%) لوجود مؤشرات خطر
+    else:
+        # إذا كان آمناً ولم يجد الفحص الخارجي أو المحلي أي مشكلة
+        if not is_api_malicious and not local_ind["has_urgency_words"]:
+            safety_score = 98  # درجة أمان عالية جداً (98%)
+        else:
+            safety_score = 85  # آمن لكن مع وجود بعض الملاحظات البسيطة
+
+    return {"status": final_status, "safety_score": safety_score, "reason": reason}
 
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
