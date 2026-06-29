@@ -10,17 +10,7 @@ from google.genai import types
 KNOWLEDGE_BASE_FILE = "knowledge_base.json"
 
 def load_knowledge_base():
-    default_keywords = [
-        "عاجل", "تحديث", "حسابك مجمد", "حسابك موقوف", "اضغط هنا", "فورا", "قفل", "حظر", "بطاقتك محظورة", 
-        "انقر هنا", "تحقق من حسابك", "تأكيد الهوية", "ربحت", "جائزة", "عقد عمل", "بريد طارئ", "تسجيل الدخول", 
-        "تغيير كلمة المرور", "الغاء القفل", "سرقة", "اختراق", "امان حسابك", "مخالفة لسياسة", "تحديث البيانات", 
-        "البنك المركزي", "تم تعليق", "تنبيه اخير", "فرصة اخيرة", "روابط الدفع", "فواتير معلقة", "شحن مجاني", 
-        "وظيفة عن بعد", "استثمر الان", "اربح مال", "فحص الحساب", "التحقق البشري", "رابط امان", "توثيق الحساب",
-        "urgent", "verify", "suspended", "click here", "fake", "phishing", "update", "frozen", "locked", 
-        "account suspended", "verify now", "action required", "immediate action", "security alert", 
-        "password reset", "login here", "claim reward", "you won", "prize", "invoice pending", "update details", 
-        "bank alert", "card blocked", "final notice", "confirm identity", "secure link", "access denied", 
-        "free gift", "make money", "work from home", "crypto bonus", "official support", "unauthorized login"]
+    default_keywords = ["عاجل", "تحديث", "حسابك مجمد", "اضغط هنا", "فورا", "قفل", "urgent", "verify", "suspended", "click here"]
     if os.path.exists(KNOWLEDGE_BASE_FILE):
         try:
             with open(KNOWLEDGE_BASE_FILE, "r", encoding="utf-8") as f:
@@ -122,7 +112,7 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
 
     if final_status == "safe" and not is_api_malicious and not local_ind["has_urgency_words"]:
         confidence = max(confidence, 95)
-        reason = "تم فحص الرابط عبر طبقات الحماية المتعددة ولم يتم العثور على أي مؤشرات تهديد."
+        reason = "تم فحص الرابط عبر طبقات الحماية المتعددة ولم يتم العثور على أي مؤشرات تهديد أولية."
 
     if is_api_malicious:
         final_status = "dangerous"
@@ -134,7 +124,7 @@ def make_final_decision(local_ind: dict, api_res: dict, llm_res: dict) -> dict:
 def main():
     st.set_page_config(page_title="محلل التهديدات الذكي والمطور", page_icon="🛡️", layout="wide")
     
-    # ♿ حقن كود CSS مخصص لإنشاء ميزة "تسهيل الوصول العائمة" (تظهر على الهاتف والكمبيوتر بنفس الكفاءة)
+    # ♿ حقن كود CSS مخصص لإنشاء ميزة "تسهيل الوصول العائمة" (تم تعديل الكلمة لـ unsafe_allow_html هنا)
     st.markdown("""
         <style>
         .accessibility-bar {
@@ -163,7 +153,7 @@ def main():
             font-weight: bold;
         }
         </style>
-    """, unsafe_allow_index=True)
+    """, unsafe_allow_html=True)
 
     st.title("🛡️ منظومة تحليل التهديدات الذكية (النسخة الاحترافية العالمية)")
     
@@ -171,10 +161,10 @@ def main():
     if "last_report_text" not in st.session_state:
         st.session_state["last_report_text"] = "مرحباً بك في نظام فحص الروابط الذكي. من فضلك ضع الرابط أو النص لبدء الفحص."
 
-    # 📱 شريط أدوات تسهيل الوصول العائم (يظهر فوق جميع العناصر في الهواتف والكمبيوتر)
+    # 📱 شريط أدوات تسهيل الوصول الذكي في القائمة الجانبية
     st.sidebar.markdown("### ♿ لوحة تسهيل الوصول الذكية")
     
-    # ميزة تحويل النص إلى كلام عبر ميزة النطق التلقائي المتوفرة في المتصفحات (تضمن العمل على الهواتف والكمبيوتر)
+    # ميزة تحويل النص إلى كلام عبر ميزة النطق التلقائي للمتصفح
     if st.sidebar.button("🔊 استمع للتقرير الحالي (صوتياً)"):
         clean_text = st.session_state["last_report_text"].replace('"', "'")
         st.components.v1.html(f"""
@@ -186,7 +176,7 @@ def main():
         """, height=0)
         st.sidebar.success("جاري نطق التقرير باللغة العربية...")
 
-    # ميزة الترجمة السريعة المدمجة
+    # ميزة الترجمة السريعة المدمجة للمظهر الاحترافي
     translate_mode = st.sidebar.checkbox("🌐 تفعيل الترجمة الفورية للإنجليزية")
 
     # واجهة إدخال البيانات الرئيسية
@@ -198,7 +188,7 @@ def main():
             st.warning("الرجاء إدخال نص أو رابط أولاً.")
             return
             
-        with st.spinner("جاري تشغيل طبقات الحماية الثلاث واستخراج المؤشرات..."):
+        with st.spinner("جاري تشغيل طبقات الحماية الثلاث واستخرج المؤشرات..."):
             indicators = extract_indicators(user_input)
             api_result = check_url_reputation(indicators["domains"][0]) if indicators["domains"] else {"notice": "لا توجد روابط خارجية."}
             llm_result = analyze_with_llm(indicators)
@@ -211,7 +201,6 @@ def main():
             reason_text = final_report["reason"]
             
             if translate_mode:
-                # محاكاة ترجمة فورية مبسطة للمظهر الاحترافي
                 reason_text += " [Translation Mode Active]"
 
             if status == "dangerous":
@@ -226,7 +215,7 @@ def main():
                 
             st.info(f"📝 **حيثيات الحكم الأمنية:** {reason_text}")
             
-            # حفظ النص في الـ session_state ليتمكن زر تحويل النص إلى كلام من قراءته فوراً عند الضغط عليه
+            # حفظ النص ليتمكن زر تحويل النص إلى كلام من قراءته فوراً عند الضغط
             st.session_state["last_report_text"] = report_speech
             
             st.success(f"🧠 قاعدة المعرفة المحلية تم تحديثها تلقائياً وتحتوي على {len(indicators['urgency_keywords'])} مؤشر أمني.")
